@@ -26,19 +26,35 @@ def main_fun(args, ctx):
     model.compile(loss='sparse_categorical_crossentropy', optimizer='SGD', metrics=['accuracy'])
     model.summary()
 
+    estimator = tf.keras.estimator.model_to_estimator(model, model_dir=args.model_dir)
 #     model.fit(train_X, train_Y, nb_epoch=50, batch_size=1, verbose=1)
 
 #     loss, accuracy = model.evaluate(test_X, test_Y, verbose=0)
 #     print("Accuracy = {:.2f}".format(accuracy))
+    tf_feed = TFNode.DataFeed(ctx.mgr)
+    def rdd_generator():
+        while not tf_feed.should_stop():
+            batch = tf_feed.next_batch(1)
+            if len(batch) > 0:
+                record = batch[0]
+                features = np.array(record[0]).astype(numpy.array)
+                label = np.array(record[1]).astype(numpy.float32)
+                yield (features, label)
 
-    estimator = tf.keras.estimator.model_to_estimator(model, model_dir=args.model_dir)
-    train_input_fn = tf.estimator.inputs.numpy_input_fn(
-        x={"dense_input": train_X},
-        y=train_Y,
-        batch_size=1,
-        num_epochs=None,
-        shuffle=True
-    )
+    def train_input_fn():
+        ds = tf.data.Dataset.from_generator(rdd_generator,
+                                           (tf.array, tf.float32),
+                                           (tf.TensorShape([4]), tf.TensorShape([3])))
+        ds = ds.batch(args.batch_size)
+        return ds
+
+#     train_input_fn = tf.estimator.inputs.numpy_input_fn(
+#         x={"dense_input": train_X},
+#         y=train_Y,
+#         batch_size=1,
+#         num_epochs=None,
+#         shuffle=True
+#     )
     eval_input_fn = tf.estimator.inputs.numpy_input_fn(
         x={"dense_input": test_X},
         y=test_Y,
@@ -57,10 +73,12 @@ def main_fun(args, ctx):
         shuffle=False
     )
 
-    preds = estimator.predict(input_fn=test_input_fn)
-    for pred in preds:
-        print(pred)
+#     preds = estimator.predict(input_fn=test_input_fn)
+#     for pred in preds:
+#         print(pred)
 
+
+from pyspark.ml.linalg import Vectors
 
 if __name__ == '__main__':
     from tensorflowonspark import TFCluster
@@ -77,6 +95,11 @@ if __name__ == '__main__':
         "steps": 2000
     })
 
-    cluster = TFCluster.run(sc, main_fun, args, args.cluster_size, args.num_ps, args.tensorboard, TFCluster.InputMode.TENSORFLOW, master_node='master')
-#     cluster.inference()
+    # iris RDD
+    iris = datasets.load_iris()
+    df = spark.createDataFrame([(int(target), Vectors.dense(data)) for target, data in zip(iris.target, iris.data)], ['label', 'features'])
+    rdd = df.select('features', 'label').rdd.map(tuple)
+
+    cluster = TFCluster.run(sc, main_fun, args, args.cluster_size, args.num_ps, args.tensorboard, TFCluster.InputMode.SPARK, master_node='master')
+    cluster.train(rdd, args.epochs)
     cluster.shutdown()
